@@ -40,7 +40,9 @@ export class Feedback {
       this.tone(note * 1.5, 0.045, 0.4, 0.04);
       if (event.depth > 1) this.tone(note * 2, 0.09, 0.45, 0.055);
       this.haptics.impact(event.depth > 1 ? 'heavy' : 'medium');
-    } else {
+    } else if (event.type === 'hold') {
+      this.tone(330, 0, 0.12, 0.035, 440); this.haptics.impact('light');
+    } else if (event.type === 'over') {
       this.tone(180, 0, 0.6, 0.07, 65);
     }
   }

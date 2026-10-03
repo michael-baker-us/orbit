@@ -3,11 +3,14 @@ import { CONFIG, colorFor } from './config';
 import { Game } from './game';
 import { Renderer, type Aim } from './renderer';
 import { Feedback } from './feedback';
+import { predictLaunch, type Forecast } from './prediction';
 
 const icon = (paths: string) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
 const soundOn = icon('<path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M15 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/>');
 const soundOff = icon('<path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="m16 9 5 6m0-6-5 6"/>');
 const resetIcon = icon('<path d="M3 10a9 9 0 1 1 2 8M3 4v6h6"/>');
+const pauseIcon = icon('<path d="M8 5v14M16 5v14"/>');
+const playIcon = icon('<path d="m8 5 11 7-11 7V5Z"/>');
 const params = new URLSearchParams(location.search);
 const requestedSeed = Number(params.get('seed'));
 const seed = params.has('seed') && Number.isFinite(requestedSeed) ? requestedSeed : Date.now();
@@ -23,6 +26,12 @@ let accumulator = 0;
 let hudCache = '';
 let labTime = 0;
 let renderMs = 0;
+let forecast: Forecast | null = null;
+let forecastAge = Infinity;
+let forecastMs = 0;
+let practice = false;
+let highest = Math.max(...game.objects.map(object => object.value), 1);
+let recordAtStart = best;
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <header class="header">
@@ -32,6 +41,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
     </button>
     <span class="edition"><span></span> AN ORBITAL PUZZLE</span>
     <div class="tools">
+      <button class="icon-button" id="game-pause" aria-label="Pause game" aria-pressed="false" title="Pause · P">${pauseIcon}</button>
       <button class="icon-button" id="sound" aria-label="Mute sound" aria-pressed="true" title="Sound">${soundOn}</button>
       <span class="tool-divider"></span>
       <button class="restart" id="restart" title="Restart · R">${resetIcon}<span>Restart</span></button>
@@ -43,23 +53,33 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <aside class="score-panel">
         <span class="eyebrow">YOUR SCORE</span><output class="score" id="score">0</output>
         <div class="best"><span class="best-icon">◇</span> BEST <span id="best">0</span></div>
+        <button class="reserve-button" id="hold" aria-label="Save ready number to reserve" title="Save or swap once per launch · H">
+          <span class="reserve-number" id="reserved">◇</span><span><span class="eyebrow">RESERVE</span><span class="reserve-caption" id="reserve-caption">Save for later</span></span>
+          <span class="reserve-key">H</span>
+        </button>
         <div class="combo" id="combo" aria-live="polite"></div>
       </aside>
       <div class="stage">
         <canvas id="board" tabindex="0" aria-label="Orbital game board. Drag from the planet to a ring and release. Keyboard: up/down select ring, left/right aim, space to launch."></canvas>
+        <div class="pause-card" id="pause-card" hidden>
+          <span class="eyebrow">PAUSED</span><h2>Take a breath.</h2><p>Your universe can wait.</p>
+          <button id="resume-game">Back into orbit ${playIcon}</button>
+        </div>
         <div class="end-card" id="end-card" hidden>
           <span class="eyebrow">OUT OF SPACE</span><h2>A beautiful run.</h2>
-          <p id="end-score"></p><button id="play-again">One more orbit ${resetIcon}</button>
+          <p id="end-score"></p><div class="run-stats" id="run-stats"></div><button id="play-again">One more orbit ${resetIcon}</button>
         </div>
       </div>
       <aside class="next-panel">
-        <div class="next-block"><span class="eyebrow">UP NEXT</span><div class="next-object" id="next">1</div><span class="next-caption">Ready for orbit</span></div>
+        <div class="next-block"><span class="eyebrow">UP NEXT</span><div class="next-object" id="next">1</div><span class="next-caption">Ready for orbit</span>
+          <div class="upcoming" aria-label="Upcoming numbers"><span>THEN</span><div id="upcoming"></div></div>
+        </div>
         <div class="capacity-block"><div class="capacity-title"><span class="eyebrow">ORBITAL SPACE</span><span id="capacity-total"></span></div>
-          <div id="capacities"></div><p id="capacity-hint">Make matches. Make room.</p>
+          <div id="capacities"></div><p id="capacity-hint">Make matches. Make room.</p><div class="overflow-track" id="overflow-track" hidden><i id="overflow-progress"></i></div>
         </div>
       </aside>
     </section>
-    <div class="instruction"><span class="instruction-dot"></span><p id="instruction">Hold the planet. Pull into orbit. Let go.</p></div>
+    <div class="instruction" id="aim-feedback"><span class="instruction-dot"></span><p id="instruction">Hold the planet. Pull into orbit. Let go.</p></div>
     <div class="merge-legend"><span class="legend-object one">1</span><span>+</span><span class="legend-object one">1</span><span class="legend-arrow">→</span><span class="legend-object two">2</span><span class="legend-caption">Same numbers. New possibilities.</span></div>
     <p id="announcement" class="sr-only" role="status" aria-live="polite"></p>
   </main>
@@ -86,12 +106,27 @@ let comboUntil = 0;
 let comboLabel = '';
 
 function updateHud() {
-  const signature = `${game.score}:${game.next}:${game.objects.length}:${game.objects.map(o => o.ring).join(',')}:${game.status}:${best}`;
+  const signature = `${game.score}:${game.next}:${game.upcoming}:${game.reserved}:${game.holdLocked}:${game.objects.length}:${game.objects.map(o => o.ring).join(',')}:${game.status}:${best}:${paused}:${debug}:${practice}`;
   if (signature === hudCache) return;
   hudCache = signature;
   scoreEl.textContent = game.score.toLocaleString();
   element('best').textContent = best.toLocaleString();
   nextEl.textContent = String(game.next); nextEl.style.setProperty('--object-color', colorFor(game.next));
+  element('upcoming').replaceChildren(...game.upcoming.map(value => {
+    const bubble = document.createElement('span'); bubble.className = 'upcoming-object';
+    bubble.textContent = String(value); bubble.style.setProperty('--object-color', colorFor(value)); return bubble;
+  }));
+  element('reserved').textContent = game.reserved === null ? '◇' : String(game.reserved);
+  element('reserved').style.setProperty('--object-color', game.reserved === null ? '#73818f' : colorFor(game.reserved));
+  element<HTMLButtonElement>('hold').disabled = game.holdLocked || paused || game.status === 'over';
+  element('hold').hidden = !CONFIG.reserveEnabled;
+  element('reserve-caption').textContent = game.holdLocked ? 'Launch to unlock' : game.reserved === null ? 'Save for later' : 'Swap with ready';
+  element('hold').setAttribute('aria-label', game.reserved === null ? 'Save ready number to reserve' : `Swap ready number with reserved ${game.reserved}`);
+  element('game-pause').innerHTML = paused ? playIcon : pauseIcon;
+  element('game-pause').setAttribute('aria-label', paused ? 'Resume game' : 'Pause game');
+  element('game-pause').setAttribute('aria-pressed', String(paused));
+  element<HTMLButtonElement>('game-pause').disabled = game.status === 'over';
+  element('pause-card').hidden = !paused || debug || game.status === 'over';
   element('capacity-total').textContent = `${game.objects.length}/${game.capacity}`;
   CONFIG.rings.forEach((ring, i) => {
     const count = game.count(i), row = element(`capacity-${i}`);
@@ -104,9 +139,10 @@ function updateHud() {
   element('capacity-hint').classList.toggle('danger', danger);
   element('end-card').hidden = game.status !== 'over';
   if (game.status === 'over') {
-    element('end-score').textContent = `${game.score.toLocaleString()} points. Another orbit awaits.`;
+    element('end-score').textContent = `${game.score.toLocaleString()} points${practice ? ' · Practice run' : game.score > recordAtStart ? ' · Personal best' : ''}`;
+    element('run-stats').innerHTML = `<span><strong>${game.merges}</strong>MERGES</span><span><strong>${highest}</strong>HIGHEST</span><span><strong>${game.maxChain || '—'}</strong>BEST CHAIN</span>`;
     element('announcement').textContent = `Out of space. Your score is ${game.score}. Restart to play again.`;
-    aim = null;
+    aim = null; forecast = null;
     element('play-again').focus();
   }
 }
@@ -116,29 +152,41 @@ function processEvents() {
     renderer.handle(event, game); feedback.handle(event);
     if (event.type === 'merge') {
       scoreEl.classList.remove('score-pop'); void scoreEl.offsetWidth; scoreEl.classList.add('score-pop');
-      if (game.score > best) {
+      highest = Math.max(highest, event.value);
+      if (!practice && game.score > best) {
         best = game.score;
         try { localStorage.setItem('orbit.best.v1', String(best)); } catch { /* Optional persistence. */ }
       }
       comboUntil = game.time + 1.9;
-      comboLabel = event.depth > 1 ? `×${event.multiplier} CHAIN REACTION` : 'A LITTLE MORE SPACE';
+      comboLabel = event.depth > 1 ? `${event.depth} MERGES · ×${event.multiplier} CHAIN` : 'A LITTLE MORE SPACE';
       element('announcement').textContent = `Merged to ${event.value}. ${event.points} points.${event.depth > 1 ? ` Chain multiplier ${event.multiplier}.` : ''}`;
     }
   }
 }
 
 function cancelAim() {
-  const oldPointer = pointer; pointer = null; aim = null;
+  const oldPointer = pointer; pointer = null; aim = null; forecast = null; forecastAge = Infinity;
   if (oldPointer !== null && canvas.hasPointerCapture(oldPointer)) canvas.releasePointerCapture(oldPointer);
 }
 function restart() {
   cancelAim(); game = new Game(CONFIG, seed); accumulator = 0; paused = false;
+  simulationSpeed = 1; element<HTMLSelectElement>('speed').value = '1'; practice = false;
+  recordAtStart = best; highest = Math.max(...game.objects.map(object => object.value), 1);
   renderer.reset(); hudCache = ''; comboUntil = 0; comboLabel = '';
   element('pause').textContent = 'Pause'; updateHud();
+  canvas.focus({ preventScroll: true });
   element('announcement').textContent = 'New orbit. Drag from the planet to launch.';
 }
-function toggleLab() { debug = !debug; element('lab').hidden = !debug; }
-function togglePause() { cancelAim(); paused = !paused; accumulator = 0; element('pause').textContent = paused ? 'Resume' : 'Pause'; }
+function toggleLab() { debug = !debug; element('lab').hidden = !debug; updateHud(); }
+function togglePause() {
+  if (game.status === 'over') return;
+  cancelAim(); paused = !paused; accumulator = 0; element('pause').textContent = paused ? 'Resume' : 'Pause'; updateHud();
+}
+function hold() {
+  if (paused || !game.hold()) return;
+  cancelAim(); feedback.unlock(); processEvents(); updateHud();
+  element('announcement').textContent = `Reserved ${game.reserved}. Ready to launch ${game.next}.`;
+}
 
 canvas.addEventListener('pointerdown', event => {
   if (pointer !== null || event.button !== 0 || paused || game.status !== 'playing' || game.cooldown > 0) return;
@@ -158,10 +206,13 @@ canvas.addEventListener('pointerup', event => {
   cancelAim(); processEvents(); updateHud();
 });
 canvas.addEventListener('pointercancel', cancelAim);
-canvas.addEventListener('lostpointercapture', () => { pointer = null; aim = null; });
+canvas.addEventListener('lostpointercapture', cancelAim);
 canvas.addEventListener('contextmenu', event => event.preventDefault());
 element('restart').addEventListener('click', restart);
 element('play-again').addEventListener('click', restart);
+element('hold').addEventListener('click', hold);
+element('game-pause').addEventListener('click', togglePause);
+element('resume-game').addEventListener('click', () => { if (paused) togglePause(); canvas.focus(); });
 element('sound').addEventListener('click', () => {
   feedback.enabled = !feedback.enabled;
   element('sound').innerHTML = feedback.enabled ? soundOn : soundOff;
@@ -173,7 +224,8 @@ document.addEventListener('keydown', event => {
   if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement || event.ctrlKey || event.metaKey || event.altKey) return;
   if (event.key.toLowerCase() === 'd') toggleLab();
   if (event.key.toLowerCase() === 'r') restart();
-  if (event.key.toLowerCase() === 'p' && debug) togglePause();
+  if (event.key.toLowerCase() === 'p') togglePause();
+  if (event.key.toLowerCase() === 'h') hold();
   if (event.key === 'Escape') { cancelAim(); if (debug) toggleLab(); }
   if (event.target !== canvas || paused || game.status !== 'playing') return;
   if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'Enter'].includes(event.key)) {
@@ -186,24 +238,26 @@ document.addEventListener('keydown', event => {
     if ((event.key === ' ' || event.key === 'Enter') && !event.repeat) { feedback.unlock(); game.launch(aim.ring, aim.angle); processEvents(); updateHud(); }
   }
 });
-canvas.addEventListener('blur', () => { if (pointer === null) aim = null; });
+canvas.addEventListener('blur', () => { if (pointer === null) cancelAim(); });
 let holdTimer: ReturnType<typeof setTimeout> | undefined;
 element('brand').addEventListener('pointerdown', () => { holdTimer = setTimeout(toggleLab, 650); });
 for (const type of ['pointerup', 'pointercancel', 'pointerleave']) element('brand').addEventListener(type, () => clearTimeout(holdTimer));
 element('brand').addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggleLab(); } });
 element('close-lab').addEventListener('click', toggleLab);
 element('pause').addEventListener('click', togglePause);
-element('step').addEventListener('click', () => { if (!paused) togglePause(); game.step(CONFIG.fixedStep); processEvents(); updateHud(); });
+element('step').addEventListener('click', () => { practice = true; if (!paused) togglePause(); game.step(CONFIG.fixedStep); processEvents(); updateHud(); });
 element('lab-restart').addEventListener('click', restart);
-element<HTMLSelectElement>('speed').addEventListener('change', event => { simulationSpeed = Number((event.target as HTMLSelectElement).value); });
+element<HTMLSelectElement>('speed').addEventListener('change', event => {
+  simulationSpeed = Number((event.target as HTMLSelectElement).value); if (simulationSpeed !== 1) practice = true; updateHud();
+});
 const labValues = () => ({
   ring: Number(element<HTMLSelectElement>('ring').value),
   value: Math.max(1, Math.min(99, Math.trunc(Number(element<HTMLInputElement>('value').value) || 1))),
   angle: (Number(element<HTMLInputElement>('angle').value) || 0) * Math.PI / 180,
 });
-element('spawn').addEventListener('click', () => { const { ring, value, angle } = labValues(); game.spawn(ring, value, angle, true); updateHud(); });
-element('merge').addEventListener('click', () => { const { ring, value, angle } = labValues(); feedback.unlock(); game.triggerMerge(ring, value, angle); processEvents(); updateHud(); });
-element('clear').addEventListener('click', () => { game.clearRing(labValues().ring); updateHud(); });
+element('spawn').addEventListener('click', () => { practice = true; const { ring, value, angle } = labValues(); game.spawn(ring, value, angle, true); updateHud(); });
+element('merge').addEventListener('click', () => { practice = true; const { ring, value, angle } = labValues(); feedback.unlock(); game.triggerMerge(ring, value, angle); processEvents(); updateHud(); });
+element('clear').addEventListener('click', () => { practice = true; game.clearRing(labValues().ring); updateHud(); });
 element('lab').hidden = !debug;
 
 let last = performance.now();
@@ -218,11 +272,28 @@ function frame(now: number) {
   processEvents(); updateHud();
   comboEl.textContent = game.time < comboUntil ? comboLabel : '';
   comboEl.classList.toggle('visible', game.time < comboUntil);
-  const drawStart = performance.now(); renderer.draw(game, aim, dt, debug, paused); renderMs = performance.now() - drawStart;
+  forecastAge += dt;
+  if (aim?.valid && !paused && game.status === 'playing') {
+    if (forecastAge >= CONFIG.forecast.refreshInterval || forecast?.ring !== aim.ring) {
+      const start = performance.now(); forecast = predictLaunch(game, aim.ring, aim.angle); forecastMs = performance.now() - start; forecastAge = 0;
+    }
+  } else forecast = null;
+  const hint = game.status === 'over' ? 'A new orbit awaits.' : paused ? 'Paused. Resume when you’re ready.' :
+    !aim?.valid ? game.overflowTime > 0 ? `Make a match — ${Math.max(0, CONFIG.capacityGrace - game.overflowTime).toFixed(1)}s left` : 'Hold the planet. Pull into orbit. Let go.' : !forecast ? 'Release to launch' :
+    forecast.endsRun ? 'Out of room. This orbit needs a match.' :
+    forecast.kind === 'chain' ? `${forecast.merges.length}-merge chain → ${forecast.resultValue} · +${forecast.points}` :
+    forecast.kind === 'match' ? `Match → ${forecast.resultValue} · +${forecast.points}` :
+    forecast.kind === 'blocked' ? 'Blocked by a different number. Try another angle.' :
+    forecast.kind === 'unavailable' ? 'Your next launch is almost ready.' : 'Open orbit. Make space for a future match.';
+  if (element('instruction').textContent !== hint) element('instruction').textContent = hint;
+  element('aim-feedback').dataset.kind = forecast?.endsRun || game.overflowTime > 0 ? 'danger' : forecast?.kind ?? '';
+  element('overflow-track').hidden = game.overflowTime === 0 || game.status === 'over';
+  element('overflow-progress').style.transform = `scaleX(${Math.min(1, game.overflowTime / CONFIG.capacityGrace)})`;
+  const drawStart = performance.now(); renderer.draw(game, aim, dt, debug, paused, forecast); renderMs = performance.now() - drawStart;
   labTime += dt;
   if (debug && labTime > 0.15) {
     labTime = 0;
-    element('inspection').textContent = `t=${game.time.toFixed(2)}s  draw=${renderMs.toFixed(2)}ms\nseed=${seed >>> 0}\nobjects=${game.objects.length}/${game.capacity}\nmerges=${game.merges}  launches=${game.launches}\noverflow=${game.overflowTime.toFixed(2)}s\nstate=${game.status}`;
+    element('inspection').textContent = `t=${game.time.toFixed(2)}s  draw=${renderMs.toFixed(2)}ms\nforecast=${forecastMs.toFixed(2)}ms\nseed=${seed >>> 0}\nobjects=${game.objects.length}/${game.capacity}\nmerges=${game.merges}  launches=${game.launches}\noverflow=${game.overflowTime.toFixed(2)}s\nstate=${game.status}${practice ? ' (practice)' : ''}`;
   }
   requestAnimationFrame(frame);
 }

@@ -40,6 +40,67 @@ test('small phone and reduced-motion layout keep play controls visible', async (
   await expect(page.locator('#board')).toBeInViewport({ ratio: 1 });
   await expect(page.locator('#restart')).toBeInViewport({ ratio: 1 });
   await expect(page.locator('.instruction')).toBeInViewport({ ratio: 1 });
+  await expect(page.locator('#hold')).toBeInViewport({ ratio: 1 });
+  await page.screenshot({ path: 'artifacts/small-phone.png', fullPage: true });
+});
+
+test('reserve locks until launch, updates the queue, and swaps on keyboard input', async ({ page }) => {
+  await page.goto('/?seed=1234');
+  const ready = await page.locator('#next').textContent();
+  const firstUpcoming = await page.locator('.upcoming-object').first().textContent();
+  await page.locator('#hold').click();
+  await expect(page.locator('#reserved')).toHaveText(ready!);
+  await expect(page.locator('#next')).toHaveText(firstUpcoming!);
+  await expect(page.locator('#hold')).toBeDisabled();
+  await page.locator('#board').focus();
+  await page.keyboard.press('ArrowUp'); await page.keyboard.press('Space');
+  await expect(page.locator('#hold')).toBeEnabled();
+  const queued = await page.locator('.upcoming-object').allTextContents();
+  await page.keyboard.press('h');
+  await expect(page.locator('#next')).toHaveText(ready!);
+  expect(await page.locator('.upcoming-object').allTextContents()).toEqual(queued);
+  await expect(page.locator('#hold')).toBeDisabled();
+});
+
+test('pause freezes the board and blocks reserve until resumed', async ({ page }) => {
+  await page.goto('/?seed=42&debug');
+  await page.getByRole('button', { name: 'Pause game', exact: true }).click();
+  await expect(page.locator('#hold')).toBeDisabled();
+  const time = (await page.locator('#inspection').textContent())?.match(/t=([\d.]+)s/)?.[1];
+  await page.locator('#close-lab').click();
+  await expect(page.locator('#pause-card')).toBeVisible();
+  await page.screenshot({ path: 'artifacts/paused.png', fullPage: true });
+  await page.getByRole('button', { name: 'Back into orbit' }).click();
+  await expect(page.locator('#pause-card')).toBeHidden();
+  await expect(page.locator('#hold')).toBeEnabled();
+  await page.keyboard.press('d');
+  await expect(page.locator('#inspection')).not.toContainText(`t=${time}s`);
+});
+
+test('aim forecast identifies a match, and releasing produces its score', async ({ page }, testInfo) => {
+  await page.goto('/?seed=42&debug');
+  await page.locator('#pause').click();
+  for (const ring of ['0', '1', '2']) { await page.locator('#ring').selectOption(ring); await page.locator('#clear').click(); }
+  await page.locator('#ring').selectOption('0');
+  await page.locator('#value').fill('1'); await page.locator('#angle').fill('45');
+  await page.locator('#spawn').click();
+  await page.locator('#speed').selectOption('4');
+  await page.locator('#pause').click();
+  // Wait until the debug object's launch boost has expired, using the visible clock.
+  await expect(page.locator('#inspection')).toContainText(/t=[3-9]\./);
+  await page.locator('#speed').selectOption('1');
+  await page.locator('#close-lab').click();
+  const board = await page.locator('#board').boundingBox();
+  if (!board) throw new Error('Missing board');
+  const x = board.x + board.width / 2, y = board.y + board.height / 2;
+  await page.mouse.move(x, y); await page.mouse.down();
+  await page.mouse.move(x + board.width * 116 / 640, y, { steps: 8 });
+  await expect(page.locator('#aim-feedback')).toHaveAttribute('data-kind', 'match');
+  await expect(page.locator('#instruction')).toContainText('Match → 2');
+  await page.screenshot({ path: `artifacts/${testInfo.project.name}-forecast.png`, fullPage: true });
+  await page.mouse.up();
+  await expect(page.locator('#score')).toHaveText('20');
+  await expect(page.locator('#best')).toHaveText('0'); // Debug editing marks the run as practice.
 });
 
 test('drag launches, dragging back cancels, and restart clears the run', async ({ page }, testInfo) => {

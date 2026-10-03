@@ -1,5 +1,6 @@
 import { CONFIG, colorFor } from './config';
 import { angularDistance, Game, type GameEvent, TAU } from './game';
+import type { Forecast } from './prediction';
 
 export interface Aim { ring: number; angle: number; valid: boolean }
 interface Particle { x: number; y: number; vx: number; vy: number; life: number; total: number; color: string; size: number }
@@ -107,7 +108,7 @@ export class Renderer {
     c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText(String(value), x, y + 0.5);
     c.restore();
   }
-  draw(game: Game, aim: Aim | null, dt: number, debug: boolean, paused: boolean) {
+  draw(game: Game, aim: Aim | null, dt: number, debug: boolean, paused: boolean, forecast: Forecast | null = null) {
     const c = this.ctx;
     this.elapsed += dt;
     this.shake *= Math.exp(-dt * 15);
@@ -126,13 +127,26 @@ export class Renderer {
     const halo = c.createRadialGradient(0, 0, 10, 0, 0, 285);
     halo.addColorStop(0, '#65e2cb0b'); halo.addColorStop(0.55, '#65e2cb03'); halo.addColorStop(1, '#65e2cb00');
     this.circle(0, 0, 285); c.fillStyle = halo; c.fill();
+    const chain = this.impacts.filter(impact => impact.depth > 1 && impact.age < 0.8).at(-1);
+    if (chain && !this.reducedMotion) {
+      const light = c.createRadialGradient(0, 0, 35, 0, 0, 280);
+      light.addColorStop(0, colorFor(chain.value) + '15'); light.addColorStop(1, colorFor(chain.value) + '00');
+      c.globalAlpha = (1 - chain.age / 0.8) * Math.min(chain.depth / 3, 1);
+      this.circle(0, 0, 280); c.fillStyle = light; c.fill(); c.globalAlpha = 1;
+    }
+    if (game.overflowTime > 0) {
+      c.lineWidth = 1.3; c.strokeStyle = '#eeac9270';
+      const radius = game.config.rings.at(-1)!.radius + 13;
+      c.beginPath(); c.arc(0, 0, radius, -Math.PI / 2, -Math.PI / 2 + TAU * Math.min(1, game.overflowTime / game.config.capacityGrace)); c.stroke();
+    }
     game.config.rings.forEach((ring, index) => {
       const count = game.count(index), crowded = count >= ring.capacity;
       const selected = aim?.valid && aim.ring === index;
+      const blocked = selected && forecast?.kind === 'blocked';
       const color = crowded ? '#eeac92' : '#83b7ba';
       c.lineWidth = selected ? 1.5 : 0.8;
       c.shadowBlur = selected ? 10 : 0; c.shadowColor = '#91ead7';
-      this.circle(0, 0, ring.radius, undefined, selected ? '#91ead78c' : color + (crowded ? '55' : '25'));
+      this.circle(0, 0, ring.radius, undefined, selected ? blocked ? '#eeac928c' : '#91ead78c' : color + (crowded ? '55' : '25'));
       c.shadowBlur = 0;
       // Quiet clockwise marker on each orbit.
       const marker = -Math.PI / 2 + game.time * ring.speed;
@@ -172,6 +186,11 @@ export class Renderer {
       const pop = impact && !this.reducedMotion ? 1 + Math.sin(Math.min(1, impact.age / game.config.mergeAnimationDuration) * Math.PI) * 0.25 : 1;
       const x = Math.cos(object.angle) * r, y = Math.sin(object.angle) * r;
       this.object(x, y, object.value, pop);
+      if (aim?.valid && object.id === forecast?.targetId) {
+        c.lineWidth = 1.4; c.setLineDash(forecast.kind === 'blocked' ? [3, 3] : []);
+        this.circle(x, y, CONFIG.objectRadius + 7, undefined, forecast.kind === 'blocked' ? '#eeac92' : '#91ead7');
+        c.setLineDash([]);
+      }
       if (debug) {
         c.font = '9px monospace'; c.textAlign = 'center'; c.fillStyle = '#99a9bd';
         c.fillText(`#${object.id} ${(object.angle * 180 / Math.PI).toFixed(0)}° ${object.speed.toFixed(2)}`, x, y + 30);
@@ -185,14 +204,27 @@ export class Renderer {
     }
     if (aim?.valid) {
       const radius = game.config.rings[aim.ring].radius, x = Math.cos(aim.angle) * radius, y = Math.sin(aim.angle) * radius;
-      c.setLineDash([3, 7]); c.lineWidth = 1; c.strokeStyle = '#91ead755';
+      const color = forecast?.kind === 'blocked' || forecast?.endsRun ? '#eeac92' : '#91ead7';
+      c.setLineDash([3, 7]); c.lineWidth = 1; c.strokeStyle = color + '55';
       c.beginPath(); c.moveTo(Math.cos(aim.angle) * 58, Math.sin(aim.angle) * 58); c.lineTo(x, y); c.stroke();
-      c.strokeStyle = '#91ead736'; c.beginPath();
-      c.arc(0, 0, radius, aim.angle + 0.1, aim.angle + game.config.boostSpeed * game.config.boostDuration); c.stroke(); c.setLineDash([]);
+      c.strokeStyle = color + '60'; c.beginPath();
+      const sweep = forecast?.contactAngle !== null && forecast?.contactAngle !== undefined ? normalizeSweep(aim.angle, forecast.contactAngle) : game.config.boostSpeed * game.config.boostDuration;
+      c.arc(0, 0, radius, aim.angle, aim.angle + sweep); c.stroke(); c.setLineDash([]);
+      if (forecast?.contactAngle !== null && forecast?.contactAngle !== undefined) {
+        const cx = Math.cos(forecast.contactAngle) * radius, cy = Math.sin(forecast.contactAngle) * radius;
+        c.lineWidth = 1; c.setLineDash([2, 4]); this.circle(cx, cy, CONFIG.objectRadius + 3, undefined, color + 'a0'); c.setLineDash([]);
+        this.circle(cx, cy, 3, color);
+      }
       this.object(x, y, game.next, 1.1, 0.8);
       c.fillStyle = '#adcfca'; c.font = '10px system-ui'; c.textAlign = 'center';
       c.fillText(`ORBIT ${aim.ring + 1}`, x, y + (y > 0 ? 39 : -35));
-      c.fillStyle = '#bdf3e6'; c.font = '11px system-ui'; c.fillText('RELEASE TO LAUNCH', 0, 82);
+      c.fillStyle = color; c.font = '11px system-ui';
+      c.fillText(forecast?.kind === 'chain' ? 'RELEASE FOR A CHAIN' : forecast?.kind === 'match' ? 'RELEASE TO MATCH' : 'RELEASE TO PLACE', 0, 82);
+    }
+    if (!aim && chain) {
+      const multiplier = Math.min(game.config.maxMultiplier, 1 + (chain.depth - 1) * game.config.comboStep);
+      c.globalAlpha = Math.min(1, (0.8 - chain.age) * 4); c.fillStyle = colorFor(chain.value);
+      c.font = '600 12px system-ui'; c.textAlign = 'center'; c.fillText(`×${multiplier} CHAIN`, 0, 81); c.globalAlpha = 1;
     }
     for (const particle of this.particles) {
       c.globalAlpha = particle.life / particle.total;
@@ -213,3 +245,5 @@ export class Renderer {
     c.restore();
   }
 }
+
+function normalizeSweep(from: number, to: number) { return ((to - from) % TAU + TAU) % TAU; }

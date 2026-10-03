@@ -18,6 +18,9 @@ export const CONFIG = {
   mergeAnimationDuration: 0.55,
   scoreBase: 10,
   capacityGrace: 1.8,
+  upcomingCount: 2,
+  reserveEnabled: true,
+  forecast: { horizon: 6, refreshInterval: 0.09 },
   spawnDistribution: [{ value: 1, weight: 0.72 }, { value: 2, weight: 0.24 }, { value: 3, weight: 0.04 }],
   difficulty: { everyMerges: 12, extraTwoWeight: 0.025, maxExtraTwoWeight: 0.15 },
   startingObjects: [

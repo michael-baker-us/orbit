@@ -10,7 +10,8 @@ export interface OrbitalObject {
 }
 export type GameEvent =
   | { type: 'launch'; ring: number; angle: number; value: number }
-  | { type: 'merge'; ring: number; angle: number; value: number; depth: number; multiplier: number; points: number; id: number }
+  | { type: 'merge'; ring: number; angle: number; value: number; depth: number; multiplier: number; points: number; id: number; sources: [number, number] }
+  | { type: 'hold'; value: number }
   | { type: 'over'; score: number };
 
 /** No browser, drawing, wall clock, sound, or global randomness in the rules. */
@@ -22,6 +23,10 @@ export class Game {
   merges = 0;
   launches = 0;
   next = 1;
+  upcoming: number[] = [];
+  reserved: number | null = null;
+  holdLocked = false;
+  maxChain = 0;
   cooldown = 0;
   overflowTime = 0;
   status: 'playing' | 'over' = 'playing';
@@ -32,6 +37,34 @@ export class Game {
     this.randomState = seed >>> 0;
     for (const object of config.startingObjects) this.spawn(object.ring, object.value, object.angle);
     this.next = this.chooseNext();
+    this.upcoming = Array.from({ length: config.upcomingCount }, () => this.chooseNext());
+  }
+
+  /** Copies future-affecting state without advancing the live RNG or copying its event queue. */
+  clone(): Game {
+    const copy = new Game({ ...this.config, startingObjects: [] }, 0);
+    copy.objects = this.objects.map(object => ({ ...object }));
+    copy.score = this.score; copy.time = this.time; copy.merges = this.merges;
+    copy.launches = this.launches; copy.next = this.next; copy.upcoming = [...this.upcoming];
+    copy.reserved = this.reserved; copy.holdLocked = this.holdLocked; copy.maxChain = this.maxChain;
+    copy.cooldown = this.cooldown; copy.overflowTime = this.overflowTime; copy.status = this.status;
+    copy.sequence = this.sequence; copy.randomState = this.randomState;
+    return copy;
+  }
+
+  private advanceQueue() {
+    this.next = this.upcoming.shift() ?? this.chooseNext();
+    while (this.upcoming.length < this.config.upcomingCount) this.upcoming.push(this.chooseNext());
+  }
+
+  hold(): boolean {
+    if (!this.config.reserveEnabled || this.status !== 'playing' || this.holdLocked) return false;
+    const ready = this.next;
+    if (this.reserved === null) this.advanceQueue();
+    else this.next = this.reserved;
+    this.reserved = ready; this.holdLocked = true;
+    this.events.push({ type: 'hold', value: this.next });
+    return true;
   }
 
   get capacity() { return this.config.rings.reduce((sum, ring) => sum + ring.capacity, 0); }
@@ -65,7 +98,8 @@ export class Game {
     const object = this.spawn(ring, this.next, angle, true);
     object.flight = this.config.flightDuration;
     this.events.push({ type: 'launch', ring, angle: object.angle, value: object.value });
-    this.next = this.chooseNext();
+    this.advanceQueue();
+    this.holdLocked = false;
     this.cooldown = this.config.launchCooldown;
     this.launches++;
     return true;
@@ -82,7 +116,8 @@ export class Game {
     this.objects = this.objects.filter(object => object.id !== a.id && object.id !== b.id);
     this.score += points;
     this.merges++;
-    this.events.push({ type: 'merge', ring: merged.ring, angle: merged.angle, value: merged.value, depth, multiplier, points, id: merged.id });
+    this.maxChain = Math.max(this.maxChain, depth);
+    this.events.push({ type: 'merge', ring: merged.ring, angle: merged.angle, value: merged.value, depth, multiplier, points, id: merged.id, sources: [a.id, b.id] });
   }
 
   /** Step with a fixed dt in production. Pair ordering is stable, including 0/2π. */

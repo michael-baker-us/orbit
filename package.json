@@ -1,6 +1,6 @@
 {
   "name": "orbit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,8 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run tests/game.test.ts",
-    "test:watch": "vitest tests/game.test.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "test:browser": "playwright test",
     "check": "npm run typecheck && npm test && npm run build"
   },
