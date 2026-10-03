@@ -66,6 +66,7 @@ test('pause freezes the board and blocks reserve until resumed', async ({ page }
   await page.goto('/?seed=42&debug');
   await page.getByRole('button', { name: 'Pause game', exact: true }).click();
   await expect(page.locator('#hold')).toBeDisabled();
+  await expect(page.locator('#inspection')).toContainText('t=');
   const time = (await page.locator('#inspection').textContent())?.match(/t=([\d.]+)s/)?.[1];
   await page.locator('#close-lab').click();
   await expect(page.locator('#pause-card')).toBeVisible();
@@ -94,13 +95,30 @@ test('aim forecast identifies a match, and releasing produces its score', async 
   if (!board) throw new Error('Missing board');
   const x = board.x + board.width / 2, y = board.y + board.height / 2;
   await page.mouse.move(x, y); await page.mouse.down();
-  await page.mouse.move(x + board.width * 116 / 640, y, { steps: 8 });
+  const angle = 4.5;
+  await page.mouse.move(x + Math.cos(angle) * board.width * 116 / 640, y + Math.sin(angle) * board.width * 116 / 640, { steps: 8 });
   await expect(page.locator('#aim-feedback')).toHaveAttribute('data-kind', 'match');
   await expect(page.locator('#instruction')).toContainText('Match → 2');
   await page.screenshot({ path: `artifacts/${testInfo.project.name}-forecast.png`, fullPage: true });
   await page.mouse.up();
   await expect(page.locator('#score')).toHaveText('20');
   await expect(page.locator('#best')).toHaveText('0'); // Debug editing marks the run as practice.
+});
+
+test('an unmodified run records its best score across a reload', async ({ page }) => {
+  await page.goto('/?seed=42');
+  const board = await page.locator('#board').boundingBox();
+  if (!board) throw new Error('Missing board');
+  const x = board.x + board.width / 2, y = board.y + board.height / 2, angle = -1.7;
+  await page.mouse.move(x, y); await page.mouse.down();
+  await page.mouse.move(x + Math.cos(angle) * board.width * 116 / 640, y + Math.sin(angle) * board.width * 116 / 640, { steps: 8 });
+  await expect(page.locator('#aim-feedback')).toHaveAttribute('data-kind', /^(match|chain)$/);
+  await page.mouse.up();
+  await expect(page.locator('#best')).not.toHaveText('0');
+  const best = await page.locator('#best').textContent();
+  await page.reload();
+  await expect(page.locator('#score')).toHaveText('0');
+  await expect(page.locator('#best')).toHaveText(best!);
 });
 
 test('drag launches, dragging back cancels, and restart clears the run', async ({ page }, testInfo) => {
@@ -155,6 +173,9 @@ test('capacity loss and the play-again control complete the loop', async ({ page
     await page.locator('#spawn').click();
   }
   await expect(page.locator('#end-card')).toBeVisible({ timeout: 10000 });
+  await expect(page.locator('#end-score')).toContainText('Practice run');
+  await expect(page.locator('#run-stats')).toContainText('MERGES');
+  await expect(page.locator('#run-stats')).toContainText('BEST CHAIN');
   await page.locator('#close-lab').click();
   await page.getByRole('button', { name: 'One more orbit' }).click();
   await expect(page.locator('#end-card')).toBeHidden();

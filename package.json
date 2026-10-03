@@ -6,11 +6,14 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc --noEmit && vite build",
+    "build:pages": "npm run build -- --base=/orbit/",
     "preview": "vite preview --host 0.0.0.0",
+    "preview:pages": "npm run preview -- --base=/orbit/",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:browser": "playwright test",
+    "test:pages": "playwright test --config playwright.pages.config.ts",
     "check": "npm run typecheck && npm test && npm run build"
   },
   "keywords": [],
